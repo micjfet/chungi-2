@@ -77,7 +77,7 @@ def process_frame(frame, lang_code="en"):
     global last_gemini_time, current_gemini_statement, last_priority_level
     frame_h, frame_w = frame.shape[:2]
     
-    lang_info = LANGUAGE_CONFIGS.get(lang_code, LANGUAGE_CONFIGS["es"])
+    lang_info = LANGUAGE_CONFIGS.get(lang_code, LANGUAGE_CONFIGS["en"])
 
     depth_map = get_depth_map(frame)
     depth_text, text_color, score = analyze_obstacle_density(depth_map)
