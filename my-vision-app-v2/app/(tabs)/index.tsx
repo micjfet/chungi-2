@@ -6,6 +6,15 @@ import { SymbolView } from 'expo-symbols';
 
 const { width } = Dimensions.get('window');
 
+const labels: Record<string, string> = {
+  en: "Danger",
+  es: "Peligro",
+  fr: "Danger",
+  vi: "Mức độ nguy hiểm",
+  ja: "危険度",
+  zh: "危险指数"
+};
+
 export default function CameraScanner() {
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
@@ -187,8 +196,13 @@ export default function CameraScanner() {
 
       {/* TOP HUD */}
       <View style={[styles.hud, { backgroundColor: getDangerColor() }]}>
+        {/* This text is now translated by the Python server */}
         <Text style={styles.hudStatus}>{navigationData.status}</Text>
-        <Text style={styles.hudScore}>Danger: {navigationData.score.toFixed(2)}</Text>
+        
+        {/* This label is translated locally by the 'labels' object */}
+        <Text style={styles.hudScore}>
+          {labels[selectedLanguage] || "Danger"}: {navigationData.score.toFixed(2)}
+        </Text>
         
         {navigationData.objects.length > 0 && (
           <View style={styles.objectContainer}>

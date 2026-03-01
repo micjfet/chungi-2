@@ -26,7 +26,7 @@ ELEVEN_KEY = os.getenv("ELEVEN_API_KEY")
 
 # --- LANGUAGE SETTINGS ---
 # Change this variable to update the system-wide language (e.g., "es", "fr", "zh")
-CURRENT_LANGUAGE = "en" 
+CURRENT_LANGUAGE = "ja" 
 
 LANGUAGE_CONFIGS = {
     "en": {"name": "English", "model_id": "eleven_turbo_v2_5"},
@@ -36,6 +36,16 @@ LANGUAGE_CONFIGS = {
     "ja": {"name": "Japanese", "model_id": "eleven_turbo_v2_5"},
     "zh": {"name": "Chinese", "model_id": "eleven_turbo_v2_5"}
 }
+
+STATUS_TRANSLATIONS = {
+    "en": {"danger": "IMMEDIATE DANGER", "warn": "WARNING: Obstacle", "clear": "PATH CLEAR"},
+    "es": {"danger": "PELIGRO INMEDIATO", "warn": "ADVERTENCIA: Obstáculo", "clear": "CAMINO DESPEJADO"},
+    "fr": {"danger": "DANGER IMMÉDIAT", "warn": "ATTENTION : Obstacle", "clear": "VOIE LIBRE"},
+    "vi": {"danger": "NGUY HIỂM LẬP TỨC", "warn": "CẢNH BÁO: Vật cản", "clear": "ĐƯỜNG TRỐNG"},
+    "ja": {"danger": "直ちに危険", "warn": "警告：障害物", "clear": "道は開いています"},
+    "zh": {"danger": "立即危险", "warn": "警告：有障碍物", "clear": "道路畅通"}
+}
+
 
 app = FastAPI()
 
@@ -66,101 +76,80 @@ def get_depth_map(img_bgr):
     depth_norm = (depth_map - depth_map.min()) / (depth_map.max() - depth_map.min())
     return depth_norm
 
+# --- 2. UPDATED VISION LOGIC ---
 def analyze_obstacle_density(depth_norm):
     h, w = depth_norm.shape
     center_strip = depth_norm[int(h*0.3):int(h*0.7), int(w*0.3):int(w*0.7)]
     danger_score = float(np.percentile(center_strip, 90))
-    if danger_score > 0.8: return "IMMEDIATE DANGER", (0, 0, 255), danger_score
-    elif danger_score > 0.5: return "WARNING: Obstacle", (0, 165, 255), danger_score
-    return "PATH CLEAR", (0, 255, 0), danger_score
+    
+    # Return a status KEY and the color, rather than a hardcoded string
+    if danger_score > 0.8: 
+        return "danger", (0, 0, 255), danger_score
+    elif danger_score > 0.5: 
+        return "warn", (0, 165, 255), danger_score
+    
+    return "clear", (0, 255, 0), danger_score
 
+# --- 3. UPDATED CORE PROCESSING ENGINE ---
 def process_frame(frame, lang_code=None):
     global last_gemini_time, current_gemini_statement, last_priority_level
     
-    # 1. Handle Language Selection
+    # Use global language if none provided by API
     if lang_code is None:
         lang_code = CURRENT_LANGUAGE
         
     frame_h, frame_w = frame.shape[:2]
     lang_info = LANGUAGE_CONFIGS.get(lang_code, LANGUAGE_CONFIGS["en"])
 
-    # 2. Vision Processing (AI Inference)
+    # Vision Processing
     depth_map = get_depth_map(frame)
-    depth_text, text_color, score = analyze_obstacle_density(depth_map)
+    status_key, text_color, score = analyze_obstacle_density(depth_map)
     yolo_results = yolo_model.predict(source=frame, conf=0.4, verbose=False)
     
-    # 3. Data Preparation for Gemini
+    # Translation Logic: Look up the string based on the current language
+    translations = STATUS_TRANSLATIONS.get(lang_code, STATUS_TRANSLATIONS["en"])
+    display_status = translations.get(status_key, "UNKNOWN")
+    
     frame_data = {
-        "navigation": {"status": depth_text, "danger_score": round(score, 3)},
+        "navigation": {"status": display_status, "danger_score": round(score, 3)},
         "objects": [],
         "resolution": {"w": frame_w, "h": frame_h},
         "target_language": lang_info["name"]
     }
 
-    # 4. Create Visual Components
-    # YOLO Detections
+    # UI Rendering
     annotated_frame = yolo_results[0].plot(line_width=2)
-    
-    # Depth Heatmap (using Magma for better contrast)
     depth_viz = cv2.applyColorMap((depth_map * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
     depth_viz = cv2.resize(depth_viz, (frame_w, frame_h))
     
-    # Stack them side-by-side
     combined_view = np.hstack((annotated_frame, depth_viz))
     
-    # --- 5. SCREEN SIZE FIX: Dynamic Scaling ---
-    MAX_WINDOW_WIDTH = 1280  # Prevents the window from going off-screen
+    # Scaling for Screen
+    MAX_WINDOW_WIDTH = 1280
     orig_h, orig_w = combined_view.shape[:2]
-    
-    if orig_w > MAX_WINDOW_WIDTH:
-        scale_factor = MAX_WINDOW_WIDTH / orig_w
-        new_w = int(orig_w * scale_factor)
-        new_h = int(orig_h * scale_factor)
-        display_view = cv2.resize(combined_view, (new_w, new_h))
-    else:
-        display_view = combined_view.copy()
-        new_w, new_h = orig_w, orig_h
+    scale_factor = MAX_WINDOW_WIDTH / orig_w if orig_w > MAX_WINDOW_WIDTH else 1.0
+    new_w, new_h = int(orig_w * scale_factor), int(orig_h * scale_factor)
+    display_view = cv2.resize(combined_view, (new_w, new_h))
 
-    # --- 6. Professional HUD Overlays (Drawn on scaled image) ---
-    # Semi-transparent footer bar
+    # HUD Overlay on Python Dashboard
     overlay = display_view.copy()
     cv2.rectangle(overlay, (0, new_h - 50), (new_w, new_h), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.6, display_view, 0.4, 0, display_view)
 
-    # Status Text (Left)
-    mode_label = "LIVE" if RUN_LIVE else "TEST"
-    cv2.putText(display_view, f"{mode_label} | {lang_info['name'].upper()}", (15, new_h - 18), 
+    # Note: Using the translated display_status here too!
+    cv2.putText(display_view, f"LANG: {lang_info['name'].upper()}", (15, new_h - 18), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-    
-    # Navigation Status (Middle-Right)
-    # Positioned at the start of the depth map half
-    cv2.putText(display_view, f"NAV: {depth_text}", (int(new_w/2) + 15, new_h - 18), 
+    cv2.putText(display_view, f"NAV: {display_status}", (int(new_w/2) + 15, new_h - 18), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
 
-    # Danger Meter (Vertical Bar on Far Right)
-    meter_top = 40
-    meter_bottom = new_h - 80
-    meter_full_h = meter_bottom - meter_top
-    current_meter_h = int(score * meter_full_h)
-    
-    # Meter Background
-    cv2.rectangle(display_view, (new_w - 30, meter_top), (new_w - 15, meter_bottom), (40, 40, 40), -1)
-    # Active Meter Level
-    cv2.rectangle(display_view, (new_w - 30, meter_bottom - current_meter_h), (new_w - 15, meter_bottom), text_color, -1)
-
-    # 7. Render to Screen
     cv2.imshow("Vision Intelligence Dashboard", display_view)
     cv2.waitKey(1) 
 
-    # --- 8. Gemini Triggering Logic ---
+    # Gemini Triggering Logic
     audio_b64 = None
     interrupt_current_audio = False
     now = time.time()
-    
-    # Determine Priority (0: Clear, 1: Warning, 2: Immediate Danger)
     current_priority = 2 if score > 0.8 else (1 if score > 0.5 else 0)
-    
-    # Trigger Gemini if: Cooldown is over AND (Priority > 0 OR Priority just escalated to 2)
     should_trigger = (now - last_gemini_time > cooldown_seconds and current_priority > 0) or \
                      (current_priority == 2 and last_priority_level < 2)
 
@@ -169,7 +158,6 @@ def process_frame(frame, lang_code=None):
         last_gemini_time = now
         last_priority_level = current_priority
         
-        # Re-populate objects specifically for the Gemini prompt
         for r in yolo_results:
             for box in r.boxes:
                 label = yolo_model.names[int(box.cls[0])]
@@ -179,10 +167,7 @@ def process_frame(frame, lang_code=None):
                 frame_data["objects"].append({"label": label, "position": position})
 
         try:
-            # Get analysis from Gemini in the target language
             current_gemini_statement = get_gemini_analysis(frame, json.dumps(frame_data))
-            
-            # Generate TTS Audio via ElevenLabs
             audio_stream = el_client.text_to_speech.convert(
                 text=current_gemini_statement,
                 voice_id="pNInz6obpgDQGcFmaJgB",
@@ -193,10 +178,7 @@ def process_frame(frame, lang_code=None):
         except Exception as e:
             print(f" Gemini/Voice Error: {e}")
 
-    # Reset priority tracking if path is clear
-    if current_priority == 0: 
-        last_priority_level = 0
-        
+    if current_priority == 0: last_priority_level = 0
     return frame_data, audio_b64, interrupt_current_audio
 
 # --- 4. API ENDPOINTS ---
