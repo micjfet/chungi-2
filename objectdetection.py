@@ -20,16 +20,24 @@ from elevenlabs.client import ElevenLabs
 from gemini import get_gemini_analysis
 
 # ==========================================
-# --- MODE SELECTOR ---
-RUN_LIVE = True
-TEST_VIDEO_PATH = "file.mp4"
+# --- CONFIGURATION & MULTILINGUAL SETUP ---
 # ==========================================
-
+RUN_LIVE = True
 ELEVEN_KEY = os.getenv("ELEVEN_API_KEY")
+
+# Mapping for supported languages
+LANGUAGE_CONFIGS = {
+    "en": {"name": "English", "model_id": "eleven_turbo_v2_5"},
+    "es": {"name": "Spanish", "model_id": "eleven_turbo_v2_5"},
+    "fr": {"name": "French", "model_id": "eleven_turbo_v2_5"},
+    "vi": {"name": "Vietnamese", "model_id": "eleven_turbo_v2_5"},
+    "ja": {"name": "Japanese", "model_id": "eleven_turbo_v2_5"},
+    "zh": {"name": "Chinese", "model_id": "eleven_turbo_v2_5"}
+}
 
 app = FastAPI()
 
-# --- 1. CONFIGURATION & INITIALIZATION ---
+# --- 1. INITIALIZATION ---
 providers = ['CPUExecutionProvider'] 
 yolo_model = YOLO("yolov8s.onnx", task='detect')
 depth_session = ort.InferenceSession("midas_small.onnx", providers=providers)
@@ -40,8 +48,6 @@ last_gemini_time = 0
 cooldown_seconds = 5
 current_gemini_statement = "System Initialized."
 last_priority_level = 0 
-
-# NEW: Bridge for Remote Messages
 pending_remote_audio = None
 pending_remote_text = ""
 
@@ -63,13 +69,15 @@ def analyze_obstacle_density(depth_norm):
     center_strip = depth_norm[int(h*0.3):int(h*0.7), int(w*0.3):int(w*0.7)]
     danger_score = float(np.percentile(center_strip, 90))
     if danger_score > 0.8: return "IMMEDIATE DANGER", (0, 0, 255), danger_score
-    elif danger_score > 0.5: return "WARNING: Obstacle", (0, 165, 255), danger_score
-    return "PATH CLEAR", (0, 255, 0), danger_score
+    elif danger_score > 0.5: return "WARNING", (0, 165, 255), danger_score
+    return "CLEAR", (0, 255, 0), danger_score
 
 # --- 3. CORE PROCESSING ENGINE ---
-def process_frame(frame):
+def process_frame(frame, lang_code="en"):
     global last_gemini_time, current_gemini_statement, last_priority_level
     frame_h, frame_w = frame.shape[:2]
+    
+    lang_info = LANGUAGE_CONFIGS.get(lang_code, LANGUAGE_CONFIGS["es"])
 
     depth_map = get_depth_map(frame)
     depth_text, text_color, score = analyze_obstacle_density(depth_map)
@@ -78,7 +86,8 @@ def process_frame(frame):
     frame_data = {
         "navigation": {"status": depth_text, "danger_score": round(score, 3)},
         "objects": [],
-        "resolution": {"w": frame_w, "h": frame_h}
+        "resolution": {"w": frame_w, "h": frame_h},
+        "target_language": lang_info["name"]
     }
 
     annotated_frame = yolo_results[0].plot()
@@ -104,11 +113,13 @@ def process_frame(frame):
         last_priority_level = current_priority
         
         try:
+            # We pass the target language in the JSON data to Gemini
             current_gemini_statement = get_gemini_analysis(frame, json.dumps(frame_data))
+            
             audio_stream = el_client.text_to_speech.convert(
                 text=current_gemini_statement,
                 voice_id="pNInz6obpgDQGcFmaJgB",
-                model_id="eleven_turbo_v2_5"
+                model_id=lang_info["model_id"] # Use multilingual model
             )
             audio_content = b"".join(list(audio_stream))
             audio_b64 = base64.b64encode(audio_content).decode('utf-8')
@@ -117,13 +128,8 @@ def process_frame(frame):
 
     if current_priority == 0: last_priority_level = 0
 
-    # UI Rendering
-    depth_viz = cv2.applyColorMap((depth_map * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
-    depth_color_res = cv2.resize(depth_viz, (frame_w, frame_h))
-    combined_view = np.hstack((annotated_frame, depth_color_res))
-    cv2.putText(combined_view, "LIVE MODE" if RUN_LIVE else "TEST MODE", (20, 30), 1, 1.5, (0, 255, 255), 2)
-    
-    cv2.imshow("Vision Dashboard", combined_view)
+    # Optional: Logic to show labels on your desktop preview
+    cv2.imshow("Vision Dashboard", annotated_frame)
     cv2.waitKey(1) 
 
     return frame_data, audio_b64, interrupt_current_audio
@@ -134,22 +140,18 @@ async def detect_broadcast(payload: dict = Body(...)):
     global pending_remote_audio, pending_remote_text
     
     img_bytes = base64.b64decode(payload['image'])
+    lang_code = payload.get('lang', 'en')
+    
     frame = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+    frame_data, gemini_audio, interrupt = process_frame(frame, lang_code)
     
-    # Process the frame normally
-    frame_data, gemini_audio, interrupt = process_frame(frame)
-    
-    # CHECK IF A REMOTE MESSAGE IS WAITING
-    # If there is a curl message, we override the Gemini audio to play the emergency msg
     final_audio = gemini_audio
     final_advice = current_gemini_statement
     
     if pending_remote_audio:
         final_audio = pending_remote_audio
         final_advice = f"[REMOTE]: {pending_remote_text}"
-        interrupt = True # Force phone to stop talking and play this
-        
-        # Clear the queue so it only plays once
+        interrupt = True
         pending_remote_audio = None
         pending_remote_text = ""
     
@@ -165,42 +167,27 @@ async def detect_broadcast(payload: dict = Body(...)):
 async def receive_message(payload: dict = Body(...)):
     global pending_remote_audio, pending_remote_text
     msg = payload.get("message", "")
+    lang_code = payload.get("lang", "en")
     
     if msg:
-        print(f"\n[QUEUEING EMERGENCY MESSAGE]: {msg}")
+        lang_info = LANGUAGE_CONFIGS.get(lang_code, LANGUAGE_CONFIGS["en"])
         try:
-            # Generate the audio and store it for the phone to pick up
             audio_stream = el_client.text_to_speech.convert(
                 text=msg,
                 voice_id="pNInz6obpgDQGcFmaJgB",
-                model_id="eleven_turbo_v2_5"
+                model_id=lang_info["model_id"]
             )
             audio_content = b"".join(list(audio_stream))
-            
             pending_remote_text = msg
             pending_remote_audio = base64.b64encode(audio_content).decode('utf-8')
-            
-            return {"status": "Message queued for next phone update"}
+            return {"status": f"Queued in {lang_info['name']}"}
         except Exception as e:
             return {"status": f"ElevenLabs Error: {e}"}, 500
             
     return {"status": "Empty message"}, 400
 
-# --- 5. EXECUTION ---
 if __name__ == "__main__":
     import uvicorn
-    
     config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
     server = uvicorn.Server(config)
-    api_thread = threading.Thread(target=server.run, daemon=True)
-    api_thread.start()
-
-    if RUN_LIVE:
-        print("[!] SERVER RUNNING. Use the Expo App to connect.")
-        try:
-            while True: time.sleep(1)
-        except KeyboardInterrupt:
-            pass
-    else:
-        # (Test mode code omitted for brevity)
-        pass
+    server.run()
