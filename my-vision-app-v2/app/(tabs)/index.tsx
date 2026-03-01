@@ -1,6 +1,6 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useState, useRef, useEffect } from 'react';
-import { StyleSheet, Text, View, Dimensions } from 'react-native';
+import { StyleSheet, Text, View, Dimensions, Vibration } from 'react-native';
 import { Audio } from 'expo-av';
 
 const { width } = Dimensions.get('window');
@@ -10,6 +10,10 @@ export default function CameraScanner() {
   const cameraRef = useRef<CameraView>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   
+  // Throttle ref to prevent vibration spam (stores timestamp)
+  const lastVibrationTime = useRef<number>(0);
+  const VIBRATION_THROTTLE_MS = 1500; 
+
   const [navigationData, setNavigationData] = useState({
     status: "CONNECTING...",
     score: 0.0,
@@ -19,8 +23,6 @@ export default function CameraScanner() {
   const TAILSCALE_IP = "100.90.17.72"; 
   const SERVER_URL = `http://${TAILSCALE_IP}:8000/detect`;
 
-  // --- 1. DEFINE AUDIO FUNCTION FIRST ---
-  // This must be defined before the useEffect that calls it
   const playVoiceCommand = async (base64Audio: string) => {
     try {
       const { sound } = await Audio.Sound.createAsync(
@@ -28,7 +30,6 @@ export default function CameraScanner() {
         { shouldPlay: true }
       );
 
-      // Cleanup memory once the speech is done
       sound.setOnPlaybackStatusUpdate((status) => {
         if (status.isLoaded && status.didJustFinish) {
           sound.unloadAsync();
@@ -39,7 +40,6 @@ export default function CameraScanner() {
     }
   };
 
-  // Set audio mode once on mount
   useEffect(() => {
     Audio.setAudioModeAsync({
       playsInSilentModeIOS: true,
@@ -48,16 +48,14 @@ export default function CameraScanner() {
     });
   }, []);
 
-  // --- 2. THE BROADCAST LOOP ---
   useEffect(() => {
     const broadcastInterval = setInterval(async () => {
-      // Check if we are already processing a frame to prevent "stacking" requests
       if (cameraRef.current && !isProcessing && permission?.granted) {
         setIsProcessing(true);
         try {
           const photo = await cameraRef.current.takePictureAsync({
             base64: true,
-            quality: 0.2, // Keep quality low for fast Tailscale transfer
+            quality: 0.2,
             skipProcessing: true,
           });
 
@@ -73,13 +71,28 @@ export default function CameraScanner() {
           });
 
           const data = await response.json();
+          const dangerScore = data.navigation.danger_score;
 
           // Update HUD
           setNavigationData({
             status: data.navigation.status,
-            score: data.navigation.danger_score,
+            score: dangerScore,
             objects: data.objects ? data.objects.map((o: any) => o.label) : []
           });
+
+          // --- THROTTLED VIBRATION LOGIC ---
+          const now = Date.now();
+          if (now - lastVibrationTime.current > VIBRATION_THROTTLE_MS) {
+            if (dangerScore > 0.8) {
+              // Heavy Warning: Double pulse
+              Vibration.vibrate([0, 400, 100, 400]);
+              lastVibrationTime.current = now;
+            } else if (dangerScore > 0.5) {
+              // Medium Warning: Single pulse
+              Vibration.vibrate(200);
+              lastVibrationTime.current = now;
+            }
+          }
 
           // Play Gemini Voice Advice
           if (data.audio && typeof data.audio === 'string') {
@@ -92,7 +105,7 @@ export default function CameraScanner() {
           setIsProcessing(false);
         }
       }
-    }, 400); // 400ms is a sweet spot for "real-time" feel without lagging the network
+    }, 400);
 
     return () => clearInterval(broadcastInterval);
   }, [permission, isProcessing]);
@@ -108,9 +121,9 @@ export default function CameraScanner() {
   }
 
   const getDangerColor = () => {
-    if (navigationData.score > 0.8) return '#FF3B30'; // Red
-    if (navigationData.score > 0.5) return '#FF9500'; // Orange
-    return '#34C759'; // Green
+    if (navigationData.score > 0.8) return '#FF3B30'; 
+    if (navigationData.score > 0.5) return '#FF9500'; 
+    return '#34C759'; 
   };
 
   return (
@@ -130,7 +143,6 @@ export default function CameraScanner() {
         )}
       </View>
 
-      {/* Blue dot blinks when an image is actively being sent to your laptop */}
       {isProcessing && <View style={styles.blinkDot} />}
     </View>
   );
@@ -148,6 +160,10 @@ const styles = StyleSheet.create({
     borderRadius: 25,
     alignItems: 'center',
     elevation: 15,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 10,
   },
   hudStatus: { color: '#fff', fontSize: 32, fontWeight: '900', letterSpacing: 1 },
   hudScore: { color: '#fff', fontSize: 16, marginTop: 5, opacity: 0.9 },
