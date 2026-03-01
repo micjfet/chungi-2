@@ -251,6 +251,19 @@ async def receive_message(payload: dict = Body(...)):
             
     return {"status": "Empty message"}, 400
 
+@app.post("/language")
+async def update_language(payload: dict = Body(...)):
+    global CURRENT_LANGUAGE
+    new_lang = payload.get("lang", "en")
+    
+    if new_lang in LANGUAGE_CONFIGS:
+        CURRENT_LANGUAGE = new_lang
+        lang_name = LANGUAGE_CONFIGS[new_lang]["name"]
+        print(f"[!] System Language updated to: {lang_name}")
+        return {"status": "success", "language": lang_name}
+    
+    return {"status": "error", "message": "Invalid language code"}, 400
+
 # --- 5. EXECUTION ---
 if __name__ == "__main__":
     import uvicorn
