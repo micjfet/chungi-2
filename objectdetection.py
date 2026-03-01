@@ -1,28 +1,32 @@
+import os
+from dotenv import load_dotenv
+
+# 1. LOAD THE ENVIRONMENT FIRST
+load_dotenv() 
+
+# 2. NOW IMPORT EVERYTHING ELSE
 import cv2
 import numpy as np
 import onnxruntime as ort
 import json
 import base64
 import time
-import os
 import threading
 from fastapi import FastAPI, Body
 from ultralytics import YOLO
 from elevenlabs.client import ElevenLabs
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
-ELEVEN_KEY = os.getenv("ELEVEN_API_KEY")
-
-from gemini import get_gemini_analysis 
+# 3. IMPORT GEMINI LAST
+from gemini import get_gemini_analysis
 
 # ==========================================
 # --- MODE SELECTOR ---
 # Set to True for Phone/API, False for Local Video
-RUN_LIVE = True 
+RUN_LIVE = False 
 TEST_VIDEO_PATH = "file.mp4"
 # ==========================================
+
+ELEVEN_KEY = os.getenv("ELEVEN_API_KEY")
 
 app = FastAPI()
 
@@ -32,10 +36,13 @@ yolo_model = YOLO("yolov8s.onnx", task='detect')
 depth_session = ort.InferenceSession("midas_small.onnx", providers=providers)
 el_client = ElevenLabs(api_key=ELEVEN_KEY)
 
+# State Management
 last_gemini_time = 0
 cooldown_seconds = 5
 current_gemini_statement = "System Initialized."
+last_priority_level = 0 
 
+# --- 2. VISION LOGIC ---
 def get_depth_map(img_bgr):
     img_input = cv2.resize(img_bgr, (256, 256))
     img_input = cv2.cvtColor(img_input, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
@@ -56,13 +63,12 @@ def analyze_obstacle_density(depth_norm):
     elif danger_score > 0.5: return "WARNING: Obstacle", (0, 165, 255), danger_score
     return "PATH CLEAR", (0, 255, 0), danger_score
 
-# --- 2. THE CORE VISION ENGINE ---
+# --- 3. CORE PROCESSING ENGINE ---
 def process_frame(frame):
     """Handles AI logic and returns display image + data for API."""
-    global last_gemini_time, current_gemini_statement
+    global last_gemini_time, current_gemini_statement, last_priority_level
     frame_h, frame_w = frame.shape[:2]
 
-    # Vision Models
     depth_map = get_depth_map(frame)
     depth_text, text_color, score = analyze_obstacle_density(depth_map)
     yolo_results = yolo_model.predict(source=frame, conf=0.4, verbose=False)
@@ -83,11 +89,20 @@ def process_frame(frame):
             position = "Center" if frame_w*0.33 < center_x < frame_w*0.66 else ("Left" if center_x < frame_w*0.33 else "Right")
             frame_data["objects"].append({"label": label, "position": position})
 
-    # Gemini & Voice
+    # Priority Logic
     audio_b64 = None
+    interrupt_current_audio = False
     now = time.time()
-    if score > 0.5 and (now - last_gemini_time) > cooldown_seconds:
+    
+    current_priority = 2 if score > 0.8 else (1 if score > 0.5 else 0)
+    should_trigger = (now - last_gemini_time > cooldown_seconds and current_priority > 0) or \
+                     (current_priority == 2 and last_priority_level < 2)
+
+    if should_trigger:
+        if current_priority == 2: interrupt_current_audio = True
         last_gemini_time = now
+        last_priority_level = current_priority
+        
         try:
             current_gemini_statement = get_gemini_analysis(frame, json.dumps(frame_data))
             audio_stream = el_client.text_to_speech.convert(
@@ -100,12 +115,13 @@ def process_frame(frame):
         except Exception as e:
             print(f" Gemini/Voice Error: {e}")
 
+    if current_priority == 0: last_priority_level = 0
+
     # Visual Output
     depth_viz = cv2.applyColorMap((depth_map * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
     depth_color_res = cv2.resize(depth_viz, (frame_w, frame_h))
     combined_view = np.hstack((annotated_frame, depth_color_res))
     
-    # Overlay Mode Info
     mode_text = "LIVE MODE" if RUN_LIVE else "TEST MODE (FILE)"
     cv2.putText(combined_view, mode_text, (20, 30), 1, 1.5, (0, 255, 255), 2)
 
@@ -114,93 +130,74 @@ def process_frame(frame):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     
     cv2.imshow("Vision Dashboard", combined_view)
-    cv2.waitKey(1) # Necessary for OpenCV window
+    cv2.waitKey(1) 
 
-    return frame_data, audio_b64
+    return frame_data, audio_b64, interrupt_current_audio
 
-# --- 3. LIVE ENDPOINT ---
+# --- 4. API ENDPOINTS ---
 @app.post("/detect")
 async def detect_broadcast(payload: dict = Body(...)):
     img_bytes = base64.b64decode(payload['image'])
     frame = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
-    frame_data, audio_b64 = process_frame(frame)
+    frame_data, audio_b64, interrupt = process_frame(frame)
     
     return {
         "navigation": frame_data["navigation"],
         "objects": frame_data["objects"],
         "advice": current_gemini_statement,
-        "audio": audio_b64
+        "audio": audio_b64,
+        "interrupt": interrupt
     }
 
-# --- 4. TEST MODE RUNNER ---
+@app.post("/message")
+async def receive_message(payload: dict = Body(...)):
+    msg = payload.get("message", "")
+    if msg:
+        threading.Thread(target=speak_remote_message, args=(msg,)).start()
+        return {"status": "Message received"}
+    return {"status": "Empty message"}, 400
+
+def speak_remote_message(text: str):
+    print(f"\n[REMOTE MESSAGE]: {text}")
+    try:
+        audio_stream = el_client.text_to_speech.convert(
+            text=text,
+            voice_id="pNInz6obpgDQGcFmaJgB",
+            model_id="eleven_turbo_v2_5"
+        )
+        # Note: This is for server logging. To hear it on the PC speakers, 
+        # you would need a library like 'pydub' or 'pygame' to play audio_stream.
+    except Exception as e:
+        print(f"Error playing remote message: {e}")
+
+# --- 5. EXECUTION ---
 def run_test_mode():
     cap = cv2.VideoCapture(TEST_VIDEO_PATH)
-    if not cap.isOpened():
-        print(f"Error: Could not open {TEST_VIDEO_PATH}")
-        return
-
     while cap.isOpened():
         success, frame = cap.read()
         if not success:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0) # Loop video
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             continue
-        
         process_frame(frame)
         if cv2.waitKey(1) & 0xFF == ord('q'): break
     cap.release()
     cv2.destroyAllWindows()
 
-# --- NEW: MESSAGE HANDLING ---
-
-def speak_message(text: str):
-    """Helper to print to terminal and play via ElevenLabs."""
-    print(f"\n[REMOTE MESSAGE]: {text}")
-    try:
-        audio_stream = el_client.text_to_speech.convert(
-            text=text,
-            voice_id="pNInz6obpgDQGcFmaJgB", # You can use a different voice ID for messages
-            model_id="eleven_turbo_v2_5"
-        )
-        # For local playback, you'd typically use a library like 'mpv' or 'pydub'
-        # Since this script is a server, we'll just log that it's processing.
-        # If you want the computer RUNNING this script to talk out loud:
-        import ioprocessing_placeholder # Use a local player if needed
-    except Exception as e:
-        print(f"Error playing remote message: {e}")
-
-@app.post("/message")
-async def receive_message(payload: dict = Body(...)):
-    """
-    Endpoint for other computers to send text.
-    Payload format: {"message": "Hello from the other side"}
-    """
-    msg = payload.get("message", "")
-    if msg:
-        # We run this in a thread so the API response isn't delayed by TTS generation
-        threading.Thread(target=speak_message, args=(msg,)).start()
-        return {"status": "Message received and being spoken"}
-    return {"status": "Empty message"}, 400
-
-# --- MODIFIED MAIN ENTRY ---
 if __name__ == "__main__":
     import uvicorn
-    # If RUN_LIVE is False, uvicorn doesn't normally run. 
-    # To support both, we'll run uvicorn in a separate thread if in TEST MODE.
     
-    if not RUN_LIVE:
-        # Start the API server in the background so it can still receive messages 
-        # while the local video window is running.
-        api_thread = threading.Thread(
-            target=uvicorn.run, 
-            args=(app,), 
-            kwargs={"host": "0.0.0.0", "port": 8000}, 
-            daemon=True
-        )
-        api_thread.start()
-        
-        print(f"[!] Starting in TEST MODE (File: {TEST_VIDEO_PATH})")
-        print("[!] API Server also running on port 8000 for remote messages.")
-        run_test_mode()
+    # Run API server in background so /message always works
+    config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
+    server = uvicorn.Server(config)
+    api_thread = threading.Thread(target=server.run, daemon=True)
+    api_thread.start()
+
+    if RUN_LIVE:
+        print("[!] LIVE MODE active. Waiting for camera/API frames...")
+        try:
+            while True: time.sleep(1)
+        except KeyboardInterrupt:
+            pass
     else:
-        print("[!] Starting in LIVE MODE (FastAPI)")
-        uvicorn.run(app, host="0.0.0.0", port=8000)
+        print(f"[!] TEST MODE active. Processing: {TEST_VIDEO_PATH}")
+        run_test_mode()
