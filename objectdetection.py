@@ -20,7 +20,7 @@ from gemini import get_gemini_analysis
 # ==========================================
 # --- MODE SELECTOR ---
 # Set to True for Phone/API, False for Local Video
-RUN_LIVE = False 
+RUN_LIVE = True 
 TEST_VIDEO_PATH = "file.mp4"
 # ==========================================
 
@@ -150,12 +150,51 @@ def run_test_mode():
     cap.release()
     cv2.destroyAllWindows()
 
-# --- 5. MAIN ENTRY ---
+# --- NEW: MESSAGE HANDLING ---
+
+def speak_message(text: str):
+    """Helper to print to terminal and play via ElevenLabs."""
+    print(f"\n[REMOTE MESSAGE]: {text}")
+    try:
+        audio_stream = el_client.text_to_speech.convert(
+            text=text,
+            voice_id="pNInz6obpgDQGcFmaJgB", # You can use a different voice ID for messages
+            model_id="eleven_turbo_v2_5"
+        )
+        # For local playback, you'd typically use a library like 'mpv' or 'pydub'
+        # Since this script is a server, we'll just log that it's processing.
+        # If you want the computer RUNNING this script to talk out loud:
+        import ioprocessing_placeholder # Use a local player if needed
+    except Exception as e:
+        print(f"Error playing remote message: {e}")
+
+@app.post("/message")
+async def receive_message(payload: dict = Body(...)):
+    """
+    Endpoint for other computers to send text.
+    Payload format: {"message": "Hello from the other side"}
+    """
+    msg = payload.get("message", "")
+    if msg:
+        threading.Thread(target=speak_message, args=(msg,)).start()
+        return {"status": "Message received and being spoken"}
+    return {"status": "Empty message"}, 400
+
+# --- MAIN ENTRY ---
 if __name__ == "__main__":
     import uvicorn
-    if RUN_LIVE:
+    if not RUN_LIVE:
+        api_thread = threading.Thread(
+            target=uvicorn.run, 
+            args=(app,), 
+            kwargs={"host": "0.0.0.0", "port": 8000}, 
+            daemon=True
+        )
+        api_thread.start()
+        
+        print(f"[!] Starting in TEST MODE (File: {TEST_VIDEO_PATH})")
+        print("[!] API Server also running on port 8000 for remote messages.")
+        run_test_mode()
+    else:
         print("[!] Starting in LIVE MODE (FastAPI)")
         uvicorn.run(app, host="0.0.0.0", port=8000)
-    else:
-        print(f"[!] Starting in TEST MODE (File: {TEST_VIDEO_PATH})")
-        run_test_mode()
