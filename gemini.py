@@ -2,7 +2,7 @@ from google import genai
 import cv2
 import PIL.Image
 
-client = genai.Client(api_key="no")
+client = genai.Client(api_key="")
 
 def get_gemini_analysis(frame, telemetry):
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -23,4 +23,6 @@ def get_gemini_analysis(frame, telemetry):
         model="gemini-2.5-flash-lite", 
         contents=[prompt, pil_img]
     )
+
+    print(f"🤖 Gemini: {response.text}")
     return response.text

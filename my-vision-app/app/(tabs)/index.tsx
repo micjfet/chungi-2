@@ -1,96 +1,139 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { useState, useRef } from 'react';
-import { Button, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useState, useRef, useEffect } from 'react';
+import { StyleSheet, Text, View, Dimensions } from 'react-native';
+import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system/legacy';
+
+const { width } = Dimensions.get('window');
 
 export default function CameraScanner() {
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
-  const [isScanning, setIsScanning] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  
+  // HUD State: Data coming back from your Python 'Brain'
+  const [navigationData, setNavigationData] = useState({
+    status: "CONNECTING...",
+    score: 0.0,
+    objects: [] as string[]
+  });
 
-  if (!permission) {
-    // Camera permissions are still loading.
-    return <View />;
-  }
+  // 1. TAILSCALE CONFIG: Put your laptop's 100.x.x.x IP here
+  const TAILSCALE_IP = "100"; 
+  const SERVER_URL = `http://${TAILSCALE_IP}:8000/detect`;
 
-  if (!permission.granted) {
-    // Camera permissions are not granted yet.
+
+
+  // 2. MAIN BROADCAST LOOP
+  useEffect(() => {
+    const broadcastInterval = setInterval(async () => {
+      if (cameraRef.current && !isProcessing && permission?.granted) {
+        setIsProcessing(true);
+        try {
+          // Capture Frame (Low quality = fast network transfer)
+          const photo = await cameraRef.current.takePictureAsync({
+            base64: true,
+            quality: 0.2, 
+            skipProcessing: true,
+          });
+      if (!photo?.base64) return;
+
+          // Send to Python Server (YOLO + MiDaS + Gemini)
+          const response = await fetch(SERVER_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: photo.base64 }),
+          });
+
+          const data = await response.json();
+
+          // Update the Phone Screen
+          setNavigationData({
+            status: data.navigation.status,
+            score: data.navigation.danger_score,
+            objects: data.objects.map((o: any) => o.label) || []
+          });
+
+          // Speak the Gemini command if it exists
+          if (data.audio && typeof data.audio === 'string') {
+            await playVoiceCommand(data.audio);
+          }
+
+        } catch (e) {
+          console.error("Network Error (Check Tailscale):", e);
+        } finally {
+          setIsProcessing(false);
+        }
+      }
+    }, 300); 
+
+    return () => clearInterval(broadcastInterval);
+  }, [permission, isProcessing]);
+
+  // --- UI LOGIC ---
+  if (!permission?.granted) {
     return (
       <View style={styles.container}>
-        <Text style={{ textAlign: 'center', marginBottom: 20 }}>
-          We need your permission to show the camera for obstacle detection.
+        <Text style={styles.permissionText} onPress={requestPermission}>
+          Tap to Grant Camera Permission
         </Text>
-        <Button onPress={requestPermission} title="Grant Permission" />
       </View>
     );
   }
 
-  const handleIdentifySurroundings = async () => {
-    if (cameraRef.current && !isScanning) {
-      setIsScanning(true);
-      try {
-        // 1. Capture the image (Optimized for Gemini 1.5/2.0 Flash)
-        const photo = await cameraRef.current.takePictureAsync({
-          base64: true,
-          quality: 0.7, // Balance between clarity and upload speed
-        });
-
-        console.log("Image captured! Base64 length:", photo?.base64?.length);
-
-        // 2. PLACEHOLDER: This is where you call your Gemini/ElevenLabs proxy
-        // const response = await fetch('YOUR_NGROK_URL/analyze', { ... });
-        
-        alert("Image captured! Ready to send to Gemini.");
-      } catch (e) {
-        console.error("Failed to take picture:", e);
-      } finally {
-        setIsScanning(false);
-      }
-    }
+  const getDangerColor = () => {
+    if (navigationData.score > 0.8) return '#FF3B30'; 
+    if (navigationData.score > 0.5) return '#FF9500'; 
+    return '#34C759'; 
   };
 
   return (
     <View style={styles.container}>
-      <CameraView style={styles.camera} ref={cameraRef}>
-        <View style={styles.buttonContainer}>
-          <TouchableOpacity 
-            style={[styles.button, isScanning && { backgroundColor: 'gray' }]} 
-            onPress={handleIdentifySurroundings}
-            disabled={isScanning}
-          >
-            <Text style={styles.text}>{isScanning ? "Analyzing..." : "Identify Surroundings"}</Text>
-          </TouchableOpacity>
-        </View>
-      </CameraView>
+      {/* Background Camera Feed */}
+      <CameraView style={styles.camera} ref={cameraRef} />
+
+      {/* DANGER HUD (Overlay) */}
+      <View style={[styles.hud, { backgroundColor: getDangerColor() }]}>
+        <Text style={styles.hudStatus}>{navigationData.status}</Text>
+        <Text style={styles.hudScore}>Danger Score: {navigationData.score.toFixed(2)}</Text>
+        
+        {/* Detected Objects List */}
+        {navigationData.objects.length > 0 && (
+          <View style={styles.objectContainer}>
+            <Text style={styles.objectText}>
+              Seeing: {navigationData.objects.join(', ')}
+            </Text>
+          </View>
+        )}
+      </View>
+
+      {/* Processing Indicator */}
+      {isProcessing && <View style={styles.blinkDot} />}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    justifyContent: 'center',
-  },
-  camera: {
-    flex: 1,
-  },
-  buttonContainer: {
-    flex: 1,
-    flexDirection: 'row',
-    backgroundColor: 'transparent',
-    margin: 64,
-  },
-  button: {
-    flex: 1,
-    alignSelf: 'flex-end',
-    alignItems: 'center',
-    backgroundColor: '#6200ee',
+  container: { flex: 1, backgroundColor: '#000' },
+  camera: { flex: 1 },
+  hud: {
+    position: 'absolute',
+    top: 50,
+    left: 15,
+    right: 15,
     padding: 20,
-    borderRadius: 15,
-    elevation: 5,
+    borderRadius: 25,
+    alignItems: 'center',
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.5,
+    shadowRadius: 10,
+    elevation: 15,
   },
-  text: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
-  },
+  hudStatus: { color: '#fff', fontSize: 32, fontWeight: '900', letterSpacing: 1 },
+  hudScore: { color: '#fff', fontSize: 16, marginTop: 5, opacity: 0.9 },
+  objectContainer: { marginTop: 15, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.3)', paddingTop: 10, width: '100%' },
+  objectText: { color: '#fff', fontSize: 14, fontWeight: 'bold', textAlign: 'center' },
+  permissionText: { color: '#fff', fontSize: 18, alignSelf: 'center', marginTop: '50%' },
+  blinkDot: { position: 'absolute', bottom: 30, right: 30, width: 12, height: 12, borderRadius: 6, backgroundColor: '#007AFF' }
 });
