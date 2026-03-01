@@ -26,13 +26,14 @@ RUN_LIVE = True
 ELEVEN_KEY = os.getenv("ELEVEN_API_KEY")
 
 # Mapping for supported languages
+# Note: switched non-English to multilingual_v2 for natural accents
 LANGUAGE_CONFIGS = {
     "en": {"name": "English", "model_id": "eleven_turbo_v2_5"},
-    "es": {"name": "Spanish", "model_id": "eleven_turbo_v2_5"},
-    "fr": {"name": "French", "model_id": "eleven_turbo_v2_5"},
-    "vi": {"name": "Vietnamese", "model_id": "eleven_turbo_v2_5"},
-    "ja": {"name": "Japanese", "model_id": "eleven_turbo_v2_5"},
-    "zh": {"name": "Chinese", "model_id": "eleven_turbo_v2_5"}
+    "es": {"name": "Spanish", "model_id": "eleven_multilingual_v2"},
+    "fr": {"name": "French", "model_id": "eleven_multilingual_v2"},
+    "vi": {"name": "Vietnamese", "model_id": "eleven_multilingual_v2"},
+    "ja": {"name": "Japanese", "model_id": "eleven_multilingual_v2"},
+    "zh": {"name": "Chinese", "model_id": "eleven_multilingual_v2"}
 }
 
 app = FastAPI()
@@ -46,7 +47,7 @@ el_client = ElevenLabs(api_key=ELEVEN_KEY)
 # State Management
 last_gemini_time = 0
 cooldown_seconds = 5
-current_gemini_statement = "System Initialized."
+current_gemini_statement = "Sistema inicializado." # Default to Spanish
 last_priority_level = 0 
 pending_remote_audio = None
 pending_remote_text = ""
@@ -68,16 +69,16 @@ def analyze_obstacle_density(depth_norm):
     h, w = depth_norm.shape
     center_strip = depth_norm[int(h*0.3):int(h*0.7), int(w*0.3):int(w*0.7)]
     danger_score = float(np.percentile(center_strip, 90))
-    if danger_score > 0.8: return "IMMEDIATE DANGER", (0, 0, 255), danger_score
-    elif danger_score > 0.5: return "WARNING", (0, 165, 255), danger_score
-    return "CLEAR", (0, 255, 0), danger_score
+    if danger_score > 0.8: return "PELIGRO INMEDIATO", (0, 0, 255), danger_score
+    elif danger_score > 0.5: return "ADVERTENCIA", (0, 165, 255), danger_score
+    return "DESPEJADO", (0, 255, 0), danger_score
 
 # --- 3. CORE PROCESSING ENGINE ---
-def process_frame(frame, lang_code="en"):
+def process_frame(frame, lang_code="es"): # <--- DEFAULT SET TO 'es'
     global last_gemini_time, current_gemini_statement, last_priority_level
     frame_h, frame_w = frame.shape[:2]
     
-    lang_info = LANGUAGE_CONFIGS.get(lang_code, LANGUAGE_CONFIGS["en"])
+    lang_info = LANGUAGE_CONFIGS.get(lang_code, LANGUAGE_CONFIGS["es"])
 
     depth_map = get_depth_map(frame)
     depth_text, text_color, score = analyze_obstacle_density(depth_map)
@@ -96,7 +97,7 @@ def process_frame(frame, lang_code="en"):
             label = yolo_model.names[int(box.cls[0])]
             coords = box.xyxy[0].tolist()
             center_x = (coords[0] + coords[2]) / 2
-            position = "Center" if frame_w*0.33 < center_x < frame_w*0.66 else ("Left" if center_x < frame_w*0.33 else "Right")
+            position = "Centro" if frame_w*0.33 < center_x < frame_w*0.66 else ("Izquierda" if center_x < frame_w*0.33 else "Derecha")
             frame_data["objects"].append({"label": label, "position": position})
 
     audio_b64 = None
@@ -113,13 +114,12 @@ def process_frame(frame, lang_code="en"):
         last_priority_level = current_priority
         
         try:
-            # We pass the target language in the JSON data to Gemini
             current_gemini_statement = get_gemini_analysis(frame, json.dumps(frame_data))
             
             audio_stream = el_client.text_to_speech.convert(
                 text=current_gemini_statement,
                 voice_id="pNInz6obpgDQGcFmaJgB",
-                model_id=lang_info["model_id"] # Use multilingual model
+                model_id=lang_info["model_id"] 
             )
             audio_content = b"".join(list(audio_stream))
             audio_b64 = base64.b64encode(audio_content).decode('utf-8')
@@ -128,7 +128,6 @@ def process_frame(frame, lang_code="en"):
 
     if current_priority == 0: last_priority_level = 0
 
-    # Optional: Logic to show labels on your desktop preview
     cv2.imshow("Vision Dashboard", annotated_frame)
     cv2.waitKey(1) 
 
@@ -140,7 +139,7 @@ async def detect_broadcast(payload: dict = Body(...)):
     global pending_remote_audio, pending_remote_text
     
     img_bytes = base64.b64decode(payload['image'])
-    lang_code = payload.get('lang', 'en')
+    lang_code = payload.get('lang', 'es') # <--- DEFAULT SET TO 'es'
     
     frame = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
     frame_data, gemini_audio, interrupt = process_frame(frame, lang_code)
@@ -167,10 +166,10 @@ async def detect_broadcast(payload: dict = Body(...)):
 async def receive_message(payload: dict = Body(...)):
     global pending_remote_audio, pending_remote_text
     msg = payload.get("message", "")
-    lang_code = payload.get("lang", "en")
+    lang_code = payload.get("lang", "es") # <--- DEFAULT SET TO 'es'
     
     if msg:
-        lang_info = LANGUAGE_CONFIGS.get(lang_code, LANGUAGE_CONFIGS["en"])
+        lang_info = LANGUAGE_CONFIGS.get(lang_code, LANGUAGE_CONFIGS["es"])
         try:
             audio_stream = el_client.text_to_speech.convert(
                 text=msg,
