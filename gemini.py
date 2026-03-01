@@ -26,10 +26,11 @@ def get_gemini_analysis(frame, telemetry_json):
     CRITICAL: You must provide your response entirely in {target_lang}.
     
     Give a concise, 1-sentence warning or instruction to the user based on the danger score and objects detected.
-    Sound human and helpful. Be specific about the location of objects (Left, Center, Right).
+    Sound human and helpful. Be specific about the location of objects (Left, in front, Right).
     Don't mention technical terms like "danger score" or "telemetry".
     If there are no objects of note, give a brief description of the path ahead.
     Assume any objects classified as "refrigerator" are actually "walls" or "large blockages".
+    CRITICAL, DO NOT use filler words like "warning" or "caution", Do not use filler phrases like "Be aware" or "Be Mindful" or "Carefully". Just give the instruction directly.
     """
 
     try:
