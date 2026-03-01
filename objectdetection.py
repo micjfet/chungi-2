@@ -20,13 +20,13 @@ from gemini import get_gemini_analysis
 # ==========================================
 # --- CONFIGURATION & MODE SELECTOR ---
 # ==========================================
-RUN_LIVE = False  # Set to False to run the TEST_VIDEO_PATH locally
+RUN_LIVE = True  # Set to False to run the TEST_VIDEO_PATH locally
 TEST_VIDEO_PATH = "file.mp4"
 ELEVEN_KEY = os.getenv("ELEVEN_API_KEY")
 
 # --- LANGUAGE SETTINGS ---
 # Change this variable to update the system-wide language (e.g., "es", "fr", "zh")
-CURRENT_LANGUAGE = "ja" 
+CURRENT_LANGUAGE = "en" 
 
 LANGUAGE_CONFIGS = {
     "en": {"name": "English", "model_id": "eleven_turbo_v2_5"},
