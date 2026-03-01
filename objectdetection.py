@@ -29,11 +29,11 @@ current_language = "es"
 
 LANGUAGE_CONFIGS = {
     "en": {"name": "English", "model_id": "eleven_turbo_v2_5"},
-    "es": {"name": "Spanish", "model_id": "eleven_multilingual_v2"},
-    "fr": {"name": "French", "model_id": "eleven_multilingual_v2"},
-    "vi": {"name": "Vietnamese", "model_id": "eleven_multilingual_v2"},
-    "ja": {"name": "Japanese", "model_id": "eleven_multilingual_v2"},
-    "zh": {"name": "Chinese", "model_id": "eleven_multilingual_v2"}
+    "es": {"name": "Spanish", "model_id": "eleven_turbo_v2_5"},
+    "fr": {"name": "French", "model_id": "eleven_turbo_v2_5"},
+    "vi": {"name": "Vietnamese", "model_id": "eleven_turbo_v2_5"},
+    "ja": {"name": "Japanese", "model_id": "eleven_turbo_v2_5"},
+    "zh": {"name": "Chinese", "model_id": "eleven_turbo_v2_5"}
 }
 
 app = FastAPI()
