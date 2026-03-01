@@ -1,8 +1,9 @@
 from google import genai
 import cv2
 import PIL.Image
+import os
 
-client = genai.Client(api_key="")
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 def get_gemini_analysis(frame, telemetry):
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)

@@ -4,9 +4,17 @@ import onnxruntime as ort
 import json
 import base64
 import time
+import os
 from fastapi import FastAPI, Body
 from ultralytics import YOLO
 from elevenlabs.client import ElevenLabs # Modern 2026 SDK
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+ELEVEN_KEY = os.getenv("ELEVEN_API_KEY")
+
 
 # Assuming your gemini.py has get_gemini_analysis(image, json_data)
 from gemini import get_gemini_analysis 
@@ -19,7 +27,7 @@ yolo_model = YOLO("yolov8s.onnx", task='detect')
 depth_session = ort.InferenceSession("midas_small.onnx", providers=providers)
 
 # ElevenLabs Setup
-el_client = ElevenLabs(api_key="")
+el_client = ElevenLabs(api_key=ELEVEN_KEY)
 
 # Gemini Throttle State
 last_gemini_time = 0
