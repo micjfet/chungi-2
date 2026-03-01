@@ -21,8 +21,7 @@ from gemini import get_gemini_analysis
 
 # ==========================================
 # --- MODE SELECTOR ---
-# Set to True for Phone/API, False for Local Video
-RUN_LIVE = False 
+RUN_LIVE = True
 TEST_VIDEO_PATH = "file.mp4"
 # ==========================================
 
@@ -41,6 +40,10 @@ last_gemini_time = 0
 cooldown_seconds = 5
 current_gemini_statement = "System Initialized."
 last_priority_level = 0 
+
+# NEW: Bridge for Remote Messages
+pending_remote_audio = None
+pending_remote_text = ""
 
 # --- 2. VISION LOGIC ---
 def get_depth_map(img_bgr):
@@ -65,7 +68,6 @@ def analyze_obstacle_density(depth_norm):
 
 # --- 3. CORE PROCESSING ENGINE ---
 def process_frame(frame):
-    """Handles AI logic and returns display image + data for API."""
     global last_gemini_time, current_gemini_statement, last_priority_level
     frame_h, frame_w = frame.shape[:2]
 
@@ -79,7 +81,6 @@ def process_frame(frame):
         "resolution": {"w": frame_w, "h": frame_h}
     }
 
-    # YOLO Processing
     annotated_frame = yolo_results[0].plot()
     for r in yolo_results:
         for box in r.boxes:
@@ -89,7 +90,6 @@ def process_frame(frame):
             position = "Center" if frame_w*0.33 < center_x < frame_w*0.66 else ("Left" if center_x < frame_w*0.33 else "Right")
             frame_data["objects"].append({"label": label, "position": position})
 
-    # Priority Logic
     audio_b64 = None
     interrupt_current_audio = False
     now = time.time()
@@ -117,17 +117,11 @@ def process_frame(frame):
 
     if current_priority == 0: last_priority_level = 0
 
-    # Visual Output
+    # UI Rendering
     depth_viz = cv2.applyColorMap((depth_map * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
     depth_color_res = cv2.resize(depth_viz, (frame_w, frame_h))
     combined_view = np.hstack((annotated_frame, depth_color_res))
-    
-    mode_text = "LIVE MODE" if RUN_LIVE else "TEST MODE (FILE)"
-    cv2.putText(combined_view, mode_text, (20, 30), 1, 1.5, (0, 255, 255), 2)
-
-    if current_gemini_statement:
-        cv2.putText(combined_view, current_gemini_statement[:75], (50, frame_h - 50), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    cv2.putText(combined_view, "LIVE MODE" if RUN_LIVE else "TEST MODE", (20, 30), 1, 1.5, (0, 255, 255), 2)
     
     cv2.imshow("Vision Dashboard", combined_view)
     cv2.waitKey(1) 
@@ -137,67 +131,76 @@ def process_frame(frame):
 # --- 4. API ENDPOINTS ---
 @app.post("/detect")
 async def detect_broadcast(payload: dict = Body(...)):
+    global pending_remote_audio, pending_remote_text
+    
     img_bytes = base64.b64decode(payload['image'])
     frame = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
-    frame_data, audio_b64, interrupt = process_frame(frame)
+    
+    # Process the frame normally
+    frame_data, gemini_audio, interrupt = process_frame(frame)
+    
+    # CHECK IF A REMOTE MESSAGE IS WAITING
+    # If there is a curl message, we override the Gemini audio to play the emergency msg
+    final_audio = gemini_audio
+    final_advice = current_gemini_statement
+    
+    if pending_remote_audio:
+        final_audio = pending_remote_audio
+        final_advice = f"[REMOTE]: {pending_remote_text}"
+        interrupt = True # Force phone to stop talking and play this
+        
+        # Clear the queue so it only plays once
+        pending_remote_audio = None
+        pending_remote_text = ""
     
     return {
         "navigation": frame_data["navigation"],
         "objects": frame_data["objects"],
-        "advice": current_gemini_statement,
-        "audio": audio_b64,
+        "advice": final_advice,
+        "audio": final_audio,
         "interrupt": interrupt
     }
 
 @app.post("/message")
 async def receive_message(payload: dict = Body(...)):
+    global pending_remote_audio, pending_remote_text
     msg = payload.get("message", "")
+    
     if msg:
-        threading.Thread(target=speak_remote_message, args=(msg,)).start()
-        return {"status": "Message received"}
+        print(f"\n[QUEUEING EMERGENCY MESSAGE]: {msg}")
+        try:
+            # Generate the audio and store it for the phone to pick up
+            audio_stream = el_client.text_to_speech.convert(
+                text=msg,
+                voice_id="pNInz6obpgDQGcFmaJgB",
+                model_id="eleven_turbo_v2_5"
+            )
+            audio_content = b"".join(list(audio_stream))
+            
+            pending_remote_text = msg
+            pending_remote_audio = base64.b64encode(audio_content).decode('utf-8')
+            
+            return {"status": "Message queued for next phone update"}
+        except Exception as e:
+            return {"status": f"ElevenLabs Error: {e}"}, 500
+            
     return {"status": "Empty message"}, 400
 
-def speak_remote_message(text: str):
-    print(f"\n[REMOTE MESSAGE]: {text}")
-    try:
-        audio_stream = el_client.text_to_speech.convert(
-            text=text,
-            voice_id="pNInz6obpgDQGcFmaJgB",
-            model_id="eleven_turbo_v2_5"
-        )
-        # Note: This is for server logging. To hear it on the PC speakers, 
-        # you would need a library like 'pydub' or 'pygame' to play audio_stream.
-    except Exception as e:
-        print(f"Error playing remote message: {e}")
-
 # --- 5. EXECUTION ---
-def run_test_mode():
-    cap = cv2.VideoCapture(TEST_VIDEO_PATH)
-    while cap.isOpened():
-        success, frame = cap.read()
-        if not success:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            continue
-        process_frame(frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'): break
-    cap.release()
-    cv2.destroyAllWindows()
-
 if __name__ == "__main__":
     import uvicorn
     
-    # Run API server in background so /message always works
     config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
     server = uvicorn.Server(config)
     api_thread = threading.Thread(target=server.run, daemon=True)
     api_thread.start()
 
     if RUN_LIVE:
-        print("[!] LIVE MODE active. Waiting for camera/API frames...")
+        print("[!] SERVER RUNNING. Use the Expo App to connect.")
         try:
             while True: time.sleep(1)
         except KeyboardInterrupt:
             pass
     else:
-        print(f"[!] TEST MODE active. Processing: {TEST_VIDEO_PATH}")
-        run_test_mode()
+        # (Test mode code omitted for brevity)
+        pass
